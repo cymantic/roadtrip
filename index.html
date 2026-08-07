@@ -454,17 +454,28 @@ The app, maps you've viewed, and routes are cached for offline use in the mounta
       try { localStorage.setItem(PREFKEY, i); } catch (e) {}
     }
     function attachTiles(map, box) {
-      var state = { layer: null };
+      var state = { layer: null, retries: 0 };
       function use(i, isFallback) {
         if (state.layer) state.layer.remove();
         var errs = 0, ok = false;
         var layer = L.tileLayer(PROVIDERS[i].url, PROVIDERS[i].opts);
-        layer.on('tileload', function () { ok = true; box.classList.remove('maperr'); });
+        layer.on('tileload', function () {
+          ok = true;
+          state.retries = 0;
+          box.classList.remove('maperr');
+        });
         layer.on('tileerror', function () {
           errs++;
-          if (ok || errs < 4) return;
-          if (!isFallback) use(1 - i, true);
-          else box.classList.add('maperr');
+          if (ok || errs < 8) return;
+          errs = 0;
+          if (!isFallback) { use(1 - i, true); return; }
+          // Both providers throttled: show the chart, retry quietly later.
+          box.classList.add('maperr');
+          if (state.retries < 3) {
+            state.retries++;
+            setTimeout(function () { use(getPref(), false); },
+                       15000 * state.retries);
+          }
         });
         layer.addTo(map);
         state.layer = layer;
@@ -503,13 +514,23 @@ The app, maps you've viewed, and routes are cached for offline use in the mounta
       if (el) pending.push({ cfg: cfg, el: el });
     });
 
+    var buildQ = [], building = false;
+    function enqueueBuild(item) { buildQ.push(item); pumpBuild(); }
+    function pumpBuild() {
+      if (building || !buildQ.length) return;
+      building = true;
+      var it = buildQ.shift();
+      buildMap(it.cfg, it.el);
+      setTimeout(function () { building = false; pumpBuild(); }, 700);
+    }
+
     if ('IntersectionObserver' in window) {
       var io = new IntersectionObserver(function (entries) {
         entries.forEach(function (en) {
           if (!en.isIntersecting) return;
           io.unobserve(en.target);
           var item = pending.find(function (p) { return p.el === en.target; });
-          if (item && !item.built) { item.built = true; buildMap(item.cfg, item.el); }
+          if (item && !item.built) { item.built = true; enqueueBuild(item); }
         });
       }, { rootMargin: '250px 0px' });
       pending.forEach(function (p) { io.observe(p.el); });
