@@ -1,9 +1,10 @@
-/* Eclipse Road Trip — service worker */
-const VERSION = 'eclipse-trip-v2';
+/* Eclipse Road Trip — service worker v3
+   Tiles are deliberately NOT intercepted: the browser loads them natively,
+   exactly like the working Run Sheet page. Offline maps come from the
+   embedded chart fallback in the page itself. */
+const VERSION = 'eclipse-trip-v3';
 const SHELL_CACHE = VERSION + '-shell';
-const TILE_CACHE = VERSION + '-tiles';
 const RUNTIME_CACHE = VERSION + '-runtime';
-const TILE_LIMIT = 600;
 
 const SHELL = [
   './',
@@ -30,38 +31,17 @@ self.addEventListener('activate', (e) => {
   );
 });
 
-async function trimCache(name, limit) {
-  const cache = await caches.open(name);
-  const keys = await cache.keys();
-  if (keys.length > limit) {
-    await cache.delete(keys[0]);
-    return trimCache(name, limit);
-  }
-}
-
-async function staleWhileRevalidate(req, cacheName, limit) {
-  const cache = await caches.open(cacheName);
-  const cached = await cache.match(req);
-  const network = fetch(req).then((res) => {
-    if (res && (res.ok || res.type === 'opaque')) {
-      cache.put(req, res.clone());
-      if (limit) trimCache(cacheName, limit);
-    }
-    return res;
-  }).catch(() => cached);
-  return cached || network;
-}
-
-async function networkFirst(req, cacheName) {
+async function networkFirst(req, cacheName, fallbackUrl) {
   const cache = await caches.open(cacheName);
   try {
     const res = await fetch(req);
-    if (res && (res.ok || res.type === 'opaque')) cache.put(req, res.clone());
+    if (res && res.ok) cache.put(req, res.clone());
     return res;
-  } catch (e) {
-    const cached = await cache.match(req);
+  } catch (err) {
+    const cached = await cache.match(req) ||
+      (fallbackUrl && await cache.match(fallbackUrl));
     if (cached) return cached;
-    throw e;
+    throw err;
   }
 }
 
@@ -70,23 +50,24 @@ async function cacheFirst(req, cacheName) {
   const cached = await cache.match(req);
   if (cached) return cached;
   const res = await fetch(req);
-  if (res && (res.ok || res.type === 'opaque')) cache.put(req, res.clone());
+  if (res && res.ok) cache.put(req, res.clone());
   return res;
 }
 
 self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
-  const url = new URL(req.url);
 
-  // Map tiles: serve cached instantly, refresh in background, cap the cache.
+  let url;
+  try { url = new URL(req.url); } catch (err) { return; }
+
+  // Map tiles: hands off — native browser loading, no interception at all.
   if (url.hostname === 'tile.openstreetmap.org' ||
       url.hostname.endsWith('cartocdn.com')) {
-    e.respondWith(staleWhileRevalidate(req, TILE_CACHE, TILE_LIMIT));
     return;
   }
 
-  // Road routes: prefer fresh, fall back to the cached geometry offline.
+  // Road routes: fresh when online, cached geometry offline.
   if (url.hostname === 'router.project-osrm.org') {
     e.respondWith(networkFirst(req, RUNTIME_CACHE));
     return;
@@ -98,16 +79,9 @@ self.addEventListener('fetch', (e) => {
     return;
   }
 
-  // Same-origin: shell-cache first; navigations fall back to index.
+  // Same-origin: network-first so new deploys appear immediately;
+  // cached shell serves it offline.
   if (url.origin === self.location.origin) {
-    e.respondWith(
-      cacheFirst(req, SHELL_CACHE).catch(async () => {
-        if (req.mode === 'navigate') {
-          const cache = await caches.open(SHELL_CACHE);
-          return cache.match('./index.html');
-        }
-        throw new Error('offline');
-      })
-    );
+    e.respondWith(networkFirst(req, SHELL_CACHE, './index.html'));
   }
 });
