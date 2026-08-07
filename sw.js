@@ -1,5 +1,5 @@
 /* Eclipse Road Trip — service worker */
-const VERSION = 'eclipse-trip-v1';
+const VERSION = 'eclipse-trip-v2';
 const SHELL_CACHE = VERSION + '-shell';
 const TILE_CACHE = VERSION + '-tiles';
 const RUNTIME_CACHE = VERSION + '-runtime';
@@ -43,7 +43,7 @@ async function staleWhileRevalidate(req, cacheName, limit) {
   const cache = await caches.open(cacheName);
   const cached = await cache.match(req);
   const network = fetch(req).then((res) => {
-    if (res && res.ok) {
+    if (res && (res.ok || res.type === 'opaque')) {
       cache.put(req, res.clone());
       if (limit) trimCache(cacheName, limit);
     }
@@ -56,7 +56,7 @@ async function networkFirst(req, cacheName) {
   const cache = await caches.open(cacheName);
   try {
     const res = await fetch(req);
-    if (res && res.ok) cache.put(req, res.clone());
+    if (res && (res.ok || res.type === 'opaque')) cache.put(req, res.clone());
     return res;
   } catch (e) {
     const cached = await cache.match(req);
@@ -70,7 +70,7 @@ async function cacheFirst(req, cacheName) {
   const cached = await cache.match(req);
   if (cached) return cached;
   const res = await fetch(req);
-  if (res && res.ok) cache.put(req, res.clone());
+  if (res && (res.ok || res.type === 'opaque')) cache.put(req, res.clone());
   return res;
 }
 
