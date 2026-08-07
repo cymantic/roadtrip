@@ -438,10 +438,10 @@ The app, maps you've viewed, and routes are cached for offline use in the mounta
     // Tile sources with automatic fallback; if all fail, restore the chart.
     var PROVIDERS = [
       { url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-        opts: { maxZoom: 17, attribution:
+        opts: { maxZoom: 17, crossOrigin: 'anonymous', updateWhenIdle: true, attribution:
           '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' } },
       { url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-        opts: { maxZoom: 17, subdomains: 'abcd', attribution:
+        opts: { maxZoom: 17, subdomains: 'abcd', crossOrigin: 'anonymous', updateWhenIdle: true, attribution:
           '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; CARTO' } }
     ];
     var PREFKEY = 'eclipse-trip-mapstyle-v1';
@@ -474,9 +474,7 @@ The app, maps you've viewed, and routes are cached for offline use in the mounta
       return state;
     }
 
-    CFG.forEach(function (cfg) {
-      var el = document.querySelector('.lmap[data-map="' + cfg.id + '"]');
-      if (!el) return;
+    function buildMap(cfg, el) {
       var map = L.map(el, { scrollWheelZoom: false, zoomControl: true });
       var tiles = attachTiles(map, el.parentElement);
       var lls = cfg.pts.map(function (p) { return p.ll; });
@@ -492,8 +490,37 @@ The app, maps you've viewed, and routes are cached for offline use in the mounta
         }).addTo(map).bindTooltip(p.n, { direction: 'top', offset: [0, -6] });
       });
       map.fitBounds(L.latLngBounds(lls).pad(0.12));
-      maps.push({ map: map, cfg: cfg, fallback: fallback, tiles: tiles });
+      setTimeout(function () { map.invalidateSize(); }, 50);
+      var m = { map: map, cfg: cfg, fallback: fallback, tiles: tiles };
+      maps.push(m);
+      routeQueue(m);
+      return m;
+    }
+
+    var pending = [];
+    CFG.forEach(function (cfg) {
+      var el = document.querySelector('.lmap[data-map="' + cfg.id + '"]');
+      if (el) pending.push({ cfg: cfg, el: el });
     });
+
+    if ('IntersectionObserver' in window) {
+      var io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (en) {
+          if (!en.isIntersecting) return;
+          io.unobserve(en.target);
+          var item = pending.find(function (p) { return p.el === en.target; });
+          if (item && !item.built) { item.built = true; buildMap(item.cfg, item.el); }
+        });
+      }, { rootMargin: '250px 0px' });
+      pending.forEach(function (p) { io.observe(p.el); });
+    } else {
+      // No observer support: build slowly to stay under tile rate limits.
+      (function slow(i) {
+        if (i >= pending.length) return;
+        buildMap(pending[i].cfg, pending[i].el);
+        setTimeout(function () { slow(i + 1); }, 800);
+      })(0);
+    }
     window.addEventListener('load', function () {
       maps.forEach(function (m) { m.map.invalidateSize(); });
     });
@@ -515,10 +542,14 @@ The app, maps you've viewed, and routes are cached for offline use in the mounta
     });
     paint(getPref());
 
-    // Road-accurate routes via OSRM, sequential and polite; dashed line if it fails.
-    (function next(i) {
-      if (i >= maps.length) return;
-      var m = maps[i];
+    // Road-accurate routes via OSRM: a polite sequential queue that
+    // lazily built maps join as they appear; dashed line if it fails.
+    var rq = [], rqBusy = false;
+    function routeQueue(m) { rq.push(m); pump(); }
+    function pump() {
+      if (rqBusy || !rq.length) return;
+      rqBusy = true;
+      var m = rq.shift();
       var coords = m.cfg.pts.map(function (p) {
         return p.ll[1] + ',' + p.ll[0];
       }).join(';');
@@ -535,8 +566,10 @@ The app, maps you've viewed, and routes are cached for offline use in the mounta
             .addTo(m.map);
         })
         .catch(function () { /* keep dashed waypoint line */ })
-        .finally(function () { setTimeout(function () { next(i + 1); }, 350); });
-    })(0);
+        .finally(function () {
+          setTimeout(function () { rqBusy = false; pump(); }, 350);
+        });
+    }
   }
 })();
 </script>
